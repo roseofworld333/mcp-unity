@@ -88,6 +88,16 @@ namespace McpUnity.Unity
         public bool IsListening => _webSocketServer?.IsListening ?? false;
 
         /// <summary>
+        /// Returns true when the editor can keep the WebSocket server alive while switching into Play Mode.
+        /// Domain reload recreates editor static state, so keeping the existing server is only safe when it is disabled.
+        /// </summary>
+        public static bool ShouldKeepServerRunningDuringPlayMode()
+        {
+            return EditorSettings.enterPlayModeOptionsEnabled &&
+                   (EditorSettings.enterPlayModeOptions & EnterPlayModeOptions.DisableDomainReload) != 0;
+        }
+
+        /// <summary>
         /// Thread-safe dictionary of connected clients with this server.
         /// WebSocketSharp dispatches OnOpen/OnClose on thread pool threads,
         /// so concurrent access must be safe.
@@ -506,7 +516,7 @@ namespace McpUnity.Unity
 
         /// <summary>
         /// Handles changes in Unity Editor's play mode state.
-        /// Stops the server when exiting Edit Mode if configured, and restarts it when entering Play Mode or returning to Edit Mode if auto-start is enabled.
+        /// Keeps the server alive during Play Mode when domain reload is disabled, otherwise preserves the legacy restart behavior.
         /// </summary>
         /// <param name="state">The current play mode state change.</param>
         private static void OnPlayModeStateChanged(PlayModeStateChange state)
@@ -516,16 +526,31 @@ namespace McpUnity.Unity
             switch (state)
             {
                 case PlayModeStateChange.ExitingEditMode:
-                    // About to enter Play Mode - use custom close code so clients use fast polling
+                    if (ShouldKeepServerRunningDuringPlayMode())
+                    {
+                        McpLogger.LogInfo("Keeping MCP Unity server online while entering Play Mode because Domain Reload is disabled.");
+                        break;
+                    }
+
+                    // About to enter Play Mode with Domain Reload enabled - use custom close code so clients use fast polling.
                     if (_instance.IsListening)
                     {
                         _instance.StopServer(UnityCloseCode.PlayMode, "Unity entering Play mode");
                     }
                     break;
+
                 case PlayModeStateChange.EnteredPlayMode:
-                case PlayModeStateChange.ExitingPlayMode:
-                    // Server is disabled during play mode as domain reload will be triggered again when stopped.
+                    if (ShouldKeepServerRunningDuringPlayMode() &&
+                        !_instance.IsListening &&
+                        McpUnitySettings.Instance.AutoStartServer)
+                    {
+                        _instance.StartServer();
+                    }
                     break;
+
+                case PlayModeStateChange.ExitingPlayMode:
+                    break;
+
                 case PlayModeStateChange.EnteredEditMode:
                     // Returned to Edit Mode
                     if (!_instance.IsListening && McpUnitySettings.Instance.AutoStartServer)
